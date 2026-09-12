@@ -1,0 +1,23 @@
+name: "Agente de Triagem — Voz da Operação"
+
+on:
+  schedule:
+    - cron: "0 10 * * 1-5"
+  workflow_dispatch:
+
+jobs:
+  triage:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Executar triagem
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          FIREBASE_URL: ${{ secrets.FIREBASE_URL }}
+          TEAMS_WEBHOOK_URL: ${{ secrets.TEAMS_WEBHOOK_URL }}
+          WHATSAPP_NUMBERS: ${{ secrets.WHATSAPP_NUMBERS }}
+          WHATSAPP_APIKEYS: ${{ secrets.WHATSAPP_APIKEYS }}
+        run: node triage-agent/triage.js
