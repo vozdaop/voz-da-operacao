@@ -1,0 +1,6 @@
+{
+  "name": "voz-triage-agent",
+  "version": "1.0.0",
+  "description": "Agente de triagem automática — Voz da Operação (Gemini free tier)",
+  "private": true
+}
