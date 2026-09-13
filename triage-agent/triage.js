@@ -2,7 +2,8 @@
  * ══════════════════════════════════════════════════════════════
  *  AGENTE DE TRIAGEM AUTOMÁTICA — VOZ DA OPERAÇÃO
  *  Engenharia Logística · Ferreira Costa · CD Cabo
- *  100% GRATUITO — Google Gemini (free tier, auto-detect model)
+ *  100% GRATUITO — Google Gemini (free tier)
+ *  v5 — com retry automático e parser resiliente
  * ══════════════════════════════════════════════════════════════
  */
 
@@ -15,60 +16,38 @@ const STATUS_OPEN = ["Aberto", "Em andamento", "Pendente", "Aguardando usuario"]
 
 let GEMINI_URL = "";
 
-/* ── Auto-detect: descobre o melhor modelo disponível ── */
+/* ── Auto-detect modelo ── */
 async function discoverModel() {
-  console.log("🔎 Descobrindo modelo disponível...\n");
+  console.log("🔎 Descobrindo modelo...");
+  const skipWords = ["embedding","tts","image","audio","video","transcribe","veo","lyria","aqa","nano","live","customtools","robotics","computer-use","antigravity","deep-research","native-audio"];
+  // Preferência: 3.6 é o recomendado pelo Google, 3.5 como fallback estável
+  const prefs = ["gemini-3.6-flash","gemini-3.5-flash","gemini-3.7-flash","gemini-3.8-flash","gemini-3.1-flash-lite"];
 
   for (const ver of ["v1beta", "v1"]) {
     try {
       const r = await fetch(`https://generativelanguage.googleapis.com/${ver}/models?key=${GEMINI_KEY}`);
-      if (r.ok) {
-        const data = await r.json();
-        const names = (data.models || []).map(m => m.name.replace("models/",""));
-        console.log(`  [${ver}] ${names.length} modelos encontrados`);
+      if (!r.ok) continue;
+      const data = await r.json();
+      const names = (data.models || []).map(m => m.name.replace("models/",""));
 
-        // Preferência: modelos mais recentes primeiro
-        const prefs = [
-          "gemini-3.8-flash",
-          "gemini-3.7-flash",
-          "gemini-3.6-flash",
-          "gemini-3.5-flash",
-          "gemini-3.1-flash-lite",
-          "gemini-3.1-pro-preview",
-          "gemini-3-flash-preview",
-          "gemini-pro-latest",
-        ];
-        for (const p of prefs) {
-          const match = names.find(n => n.startsWith(p));
-          if (match) {
-            GEMINI_URL = `https://generativelanguage.googleapis.com/${ver}/models/${match}:generateContent?key=${GEMINI_KEY}`;
-            console.log(`  ✓ Selecionado: ${match} (${ver})\n`);
-            return match;
-          }
-        }
-        // Fallback: qualquer gemini flash que não seja embedding/tts/image/audio/video
-        const skipPatterns = ["embedding", "tts", "image", "audio", "video", "transcribe", "veo", "lyria", "aqa", "nano", "live"];
-        const fallback = names.find(n => n.includes("flash") && !skipPatterns.some(s => n.includes(s)));
-        if (fallback) {
-          GEMINI_URL = `https://generativelanguage.googleapis.com/${ver}/models/${fallback}:generateContent?key=${GEMINI_KEY}`;
-          console.log(`  ✓ Fallback: ${fallback} (${ver})\n`);
-          return fallback;
-        }
-        // Último recurso: qualquer gemini pro
-        const proBk = names.find(n => n.includes("pro") && !skipPatterns.some(s => n.includes(s)));
-        if (proBk) {
-          GEMINI_URL = `https://generativelanguage.googleapis.com/${ver}/models/${proBk}:generateContent?key=${GEMINI_KEY}`;
-          console.log(`  ✓ Fallback pro: ${proBk} (${ver})\n`);
-          return proBk;
+      for (const p of prefs) {
+        const match = names.find(n => n.startsWith(p));
+        if (match) {
+          GEMINI_URL = `https://generativelanguage.googleapis.com/${ver}/models/${match}:generateContent?key=${GEMINI_KEY}`;
+          console.log(`  ✓ ${match} (${ver})\n`);
+          return match;
         }
       }
-    } catch(e) {
-      console.log(`  [${ver}] Erro: ${e.message}`);
-    }
+      // Fallback genérico
+      const fb = names.find(n => n.includes("flash") && !skipWords.some(s => n.includes(s)));
+      if (fb) {
+        GEMINI_URL = `https://generativelanguage.googleapis.com/${ver}/models/${fb}:generateContent?key=${GEMINI_KEY}`;
+        console.log(`  ✓ fallback: ${fb} (${ver})\n`);
+        return fb;
+      }
+    } catch(e) { /* next */ }
   }
-
-  console.error("\n❌ Nenhum modelo Gemini disponível.");
-  process.exit(1);
+  console.error("❌ Nenhum modelo encontrado"); process.exit(1);
 }
 
 /* ── Firebase ── */
@@ -87,50 +66,91 @@ async function fbSet(path, value) {
   return r.json();
 }
 
-/* ── Gemini — análise ── */
-const WMS_CONTEXT = `Você é um agente de triagem especialista em WMS (Warehouse Management System) da Ferreira Costa, CD Cabo de Santo Agostinho.
+/* ── Chamada Gemini com retry ── */
+async function callGemini(prompt, maxRetries = 3) {
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    try {
+      const res = await fetch(GEMINI_URL, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          contents: [{ parts: [{ text: prompt }] }],
+          generationConfig: { temperature: 0.2, maxOutputTokens: 1024 },
+        }),
+      });
 
-DOMÍNIOS:
-- Via Cega (recebimento cego): tabelas VCEGA, VCEGA_IT, VCEGA_IT_CONF, VCEGA_IT_LOG, WMS_VCEGA_UMA. PKs compostas: NR_VIACEGA + COD_EMPRESA + CODIGO_PRODUTO + SEQUENCIA. VCEGA_IT usa PRODUTO, outras usam CODIGO_PRODUTO. Sempre COD_EMPRESA no WHERE.
-- Endereçamento: UMAs, endereços, blocado dinâmico, piso elevado
-- Separação/Picking: ordens de separação, status picking (6=cancelado), multivolume
-- Conferência: reconferência, fracionamento, contagem
-- Estoque: divergências, bloqueio, transferência UMAs, liberação (status 2→3)
-- TMS: transporte, rastreamento
-- Fulfillment (FUL): pedidos ecommerce
+      if (res.status === 503 || res.status === 429) {
+        const wait = attempt * 3000; // 3s, 6s, 9s
+        console.log(`     ⏳ Modelo ocupado (${res.status}), tentativa ${attempt}/${maxRetries}, aguardando ${wait/1000}s...`);
+        await new Promise(r => setTimeout(r, wait));
+        continue;
+      }
 
-SCHEMAS Oracle: MAXXON e SFC. DB Links: @fcbkp_cab.com (CABO), @fcbkp_ObcCabo.com (OBC).
+      if (!res.ok) {
+        const errText = await res.text();
+        throw new Error(`Gemini ${res.status}: ${errText.slice(0,200)}`);
+      }
 
-INSTRUÇÕES:
-1. Classifique o domínio
-2. Avalie severidade real (Crítico/Alto/Médio/Baixo) pelo impacto operacional
-3. Formule hipótese de causa raiz
-4. Gere 1-3 SQLs Oracle para investigar (use dados do ticket como filtros)
-5. Recomende próximos passos concretos
+      const data = await res.json();
+      const text = data.candidates?.[0]?.content?.parts?.[0]?.text;
+      if (!text) throw new Error("Resposta vazia");
+      return text;
+    } catch(e) {
+      if (attempt === maxRetries) throw e;
+      console.log(`     ⚠ Tentativa ${attempt} falhou: ${e.message}`);
+      await new Promise(r => setTimeout(r, attempt * 2000));
+    }
+  }
+}
 
-Responda APENAS com JSON válido, sem markdown, sem texto extra:
-{"dominio":"string","severidade":"Crítico|Alto|Médio|Baixo","hipotese":"string","sql_queries":[{"titulo":"string","query":"SQL Oracle"}],"proximos_passos":["string"],"resumo":"1 frase"}`;
+/* ── Extrair JSON de forma resiliente ── */
+function extractJSON(text) {
+  // Limpar markdown
+  let clean = text.replace(/```json\s*/g, "").replace(/```\s*/g, "").trim();
+
+  // Tentar parse direto
+  try { return JSON.parse(clean); } catch(e) { /* continua */ }
+
+  // Extrair primeiro objeto JSON
+  const match = clean.match(/\{[\s\S]*\}/);
+  if (match) {
+    try { return JSON.parse(match[0]); } catch(e) { /* continua */ }
+
+    // Tentar consertar JSON truncado/malformado
+    let fixed = match[0];
+    // Fechar arrays abertos
+    const openBrackets = (fixed.match(/\[/g) || []).length;
+    const closeBrackets = (fixed.match(/\]/g) || []).length;
+    for (let i = 0; i < openBrackets - closeBrackets; i++) fixed += ']';
+    // Fechar strings abertas
+    const quotes = (fixed.match(/"/g) || []).length;
+    if (quotes % 2 !== 0) fixed += '"';
+    // Fechar objeto
+    if (!fixed.endsWith('}')) fixed += '}';
+    // Remover trailing commas
+    fixed = fixed.replace(/,\s*([}\]])/g, '$1');
+
+    try { return JSON.parse(fixed); } catch(e) { /* desiste */ }
+  }
+
+  throw new Error("JSON não extraível da resposta");
+}
+
+/* ── Análise de ticket ── */
+const WMS_CONTEXT = `Você é um agente de triagem WMS da Ferreira Costa, CD Cabo de Santo Agostinho.
+
+DOMÍNIOS: Via Cega (VCEGA, VCEGA_IT, VCEGA_IT_CONF, WMS_VCEGA_UMA — PKs compostas, sempre COD_EMPRESA no WHERE), Endereçamento (UMAs, blocado dinâmico, piso elevado), Separação (ordens, status 6=cancelado, multivolume), Conferência (reconferência, fracionamento), Estoque (divergências, bloqueio, transferência UMAs, status 2→3), TMS (transporte), Fulfillment (ecommerce).
+SCHEMAS: MAXXON, SFC. DB Links: @fcbkp_cab.com, @fcbkp_ObcCabo.com.
+
+Analise o ticket e responda SOMENTE com este JSON (sem texto extra, sem markdown):
+{"dominio":"string","severidade":"Crítico|Alto|Médio|Baixo","hipotese":"causa raiz em 1 frase","sql_queries":[{"titulo":"string","query":"SQL Oracle"}],"proximos_passos":["string"],"resumo":"diagnóstico em 1 frase"}`;
 
 async function analyzeTicket(ticket) {
-  const ticketInfo = `TICKET: ${ticket.id}\nTÍTULO: ${ticket.title}\nTIPO: ${ticket.type||"N/A"}\nCRITICIDADE: ${ticket.criticality}\nSTATUS: ${ticket.status}\nDESCRIÇÃO: ${ticket.desc||"Sem descrição"}\nSOLICITANTE: ${ticket.requester}\nDOC REF: ${ticket.doc||"Nenhum"}\nABERTO EM: ${ticket.createdAt}`;
-  const fullPrompt = `${WMS_CONTEXT}\n\n--- TICKET PARA TRIAGEM ---\n${ticketInfo}`;
+  const ticketInfo = `TICKET: ${ticket.id} | TÍTULO: ${ticket.title} | TIPO: ${ticket.type||"N/A"} | CRITICIDADE: ${ticket.criticality} | STATUS: ${ticket.status} | DESCRIÇÃO: ${ticket.desc||"Sem descrição"} | SOLICITANTE: ${ticket.requester} | DOC: ${ticket.doc||"Nenhum"} | DATA: ${ticket.createdAt}`;
 
   try {
-    const res = await fetch(GEMINI_URL, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        contents: [{ parts: [{ text: fullPrompt }] }],
-        generationConfig: { temperature: 0.3, maxOutputTokens: 1024 },
-      }),
-    });
-    if (!res.ok) throw new Error(`Gemini ${res.status}: ${(await res.text()).slice(0,300)}`);
-    const data = await res.json();
-    const text = data.candidates?.[0]?.content?.parts?.[0]?.text;
-    if (!text) throw new Error("Resposta vazia");
-    const jsonMatch = text.replace(/```json\s*/g,"").replace(/```\s*/g,"").trim().match(/\{[\s\S]*\}/);
-    if (!jsonMatch) throw new Error("JSON não encontrado");
-    return JSON.parse(jsonMatch[0]);
+    const rawText = await callGemini(`${WMS_CONTEXT}\n\n${ticketInfo}`);
+    return extractJSON(rawText);
   } catch (e) {
     console.error(`  ✗ Erro ${ticket.id}:`, e.message);
     return { dominio:"Erro", severidade:"Médio", hipotese:"Falha: "+e.message, sql_queries:[], proximos_passos:["Analisar manualmente"], resumo:"Análise falhou" };
@@ -154,11 +174,6 @@ function buildTeamsCard(results, dateStr) {
     return `${e} **${r.ticket.id}** — ${r.analysis.resumo}`;
   }).join("\n\n");
 
-  const sqlLines = sorted.filter(r=>r.analysis.severidade==="Crítico" && r.analysis.sql_queries?.length>0).slice(0,3).map(r => {
-    const sq=r.analysis.sql_queries[0];
-    return `**${r.ticket.id}** — ${sq.titulo}:\n\`${sq.query.slice(0,200)}\``;
-  }).join("\n\n");
-
   const body = [
     { type:"TextBlock", text:`🔍 Triagem Automática — ${dateStr}`, weight:"bolder", size:"medium" },
     { type:"TextBlock", text:`🔴 ${c["Crítico"]} Crítico · 🟠 ${c.Alto} Alto · 🟡 ${c["Médio"]} Médio · 🟢 ${c.Baixo} Baixo`, spacing:"small" },
@@ -166,15 +181,7 @@ function buildTeamsCard(results, dateStr) {
     { type:"TextBlock", text:"───────────────────", spacing:"medium" },
     { type:"TextBlock", text:lines, wrap:true, spacing:"small", size:"small" },
   ];
-  if (sqlLines) {
-    body.push(
-      { type:"TextBlock", text:"───────────────────", spacing:"medium" },
-      { type:"TextBlock", text:"🔎 SQLs Críticos:", weight:"bolder", size:"small" },
-      { type:"TextBlock", text:sqlLines, wrap:true, size:"small", fontType:"monospace" }
-    );
-  }
   if (results.length>15) body.push({ type:"TextBlock", text:`_+${results.length-15} tickets_`, isSubtle:true, size:"small" });
-
   return { type:"message", attachments:[{ contentType:"application/vnd.microsoft.card.adaptive", content:{ $schema:"http://adaptivecards.io/schemas/adaptive-card.json", type:"AdaptiveCard", version:"1.4", body }}] };
 }
 
@@ -211,10 +218,7 @@ async function main() {
   console.log(`  AGENTE DE TRIAGEM — ${dateStr}`);
   console.log(`${"═".repeat(50)}\n`);
 
-  if (!GEMINI_KEY) {
-    console.error("❌ GEMINI_API_KEY não configurada!");
-    process.exit(1);
-  }
+  if (!GEMINI_KEY) { console.error("❌ GEMINI_API_KEY não configurada!"); process.exit(1); }
 
   await discoverModel();
 
@@ -249,7 +253,7 @@ async function main() {
     console.log(`   → ${analysis.severidade} | ${analysis.dominio} | ${analysis.resumo}`);
     try { await fbSet(`triagens/${dateKey}/${t._key}`, { ...analysis, ticketId:t.id, analyzedAt:new Date().toISOString() }); } catch(e) { console.log(`   ⚠ Save: ${e.message}`); }
     results.push({ ticket:t, analysis });
-    if (i < pending.length-1) await new Promise(r=>setTimeout(r,1000));
+    if (i < pending.length-1) await new Promise(r=>setTimeout(r,2000)); // 2s entre tickets
   }
 
   const criticals = results.filter(r=>r.analysis.severidade==="Crítico");
