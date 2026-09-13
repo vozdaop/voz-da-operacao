@@ -15,82 +15,59 @@ const STATUS_OPEN = ["Aberto", "Em andamento", "Pendente", "Aguardando usuario"]
 
 let GEMINI_URL = "";
 
-/* ── Auto-detect: tenta cada modelo+endpoint até um funcionar ── */
+/* ── Auto-detect: descobre o melhor modelo disponível ── */
 async function discoverModel() {
   console.log("🔎 Descobrindo modelo disponível...\n");
 
-  // Primeiro: listar modelos da API key
   for (const ver of ["v1beta", "v1"]) {
     try {
       const r = await fetch(`https://generativelanguage.googleapis.com/${ver}/models?key=${GEMINI_KEY}`);
       if (r.ok) {
         const data = await r.json();
         const names = (data.models || []).map(m => m.name.replace("models/",""));
-        console.log(`  [${ver}] ${names.length} modelos encontrados:`);
-        names.forEach(n => console.log(`    - ${n}`));
+        console.log(`  [${ver}] ${names.length} modelos encontrados`);
 
-        // Escolher o melhor disponível
-        const prefs = ["gemini-2.5-flash","gemini-2.0-flash","gemini-1.5-flash","gemini-1.5-pro","gemini-pro"];
+        // Preferência: modelos mais recentes primeiro
+        const prefs = [
+          "gemini-3.8-flash",
+          "gemini-3.7-flash",
+          "gemini-3.6-flash",
+          "gemini-3.5-flash",
+          "gemini-3.1-flash-lite",
+          "gemini-3.1-pro-preview",
+          "gemini-3-flash-preview",
+          "gemini-pro-latest",
+        ];
         for (const p of prefs) {
           const match = names.find(n => n.startsWith(p));
           if (match) {
             GEMINI_URL = `https://generativelanguage.googleapis.com/${ver}/models/${match}:generateContent?key=${GEMINI_KEY}`;
-            console.log(`\n  ✓ Selecionado: ${match} (${ver})\n`);
+            console.log(`  ✓ Selecionado: ${match} (${ver})\n`);
             return match;
           }
         }
-        // Fallback: qualquer modelo que suporte generateContent
-        const any = names.find(n => n.includes("gemini"));
-        if (any) {
-          GEMINI_URL = `https://generativelanguage.googleapis.com/${ver}/models/${any}:generateContent?key=${GEMINI_KEY}`;
-          console.log(`\n  ✓ Fallback: ${any} (${ver})\n`);
-          return any;
+        // Fallback: qualquer gemini flash que não seja embedding/tts/image/audio/video
+        const skipPatterns = ["embedding", "tts", "image", "audio", "video", "transcribe", "veo", "lyria", "aqa", "nano", "live"];
+        const fallback = names.find(n => n.includes("flash") && !skipPatterns.some(s => n.includes(s)));
+        if (fallback) {
+          GEMINI_URL = `https://generativelanguage.googleapis.com/${ver}/models/${fallback}:generateContent?key=${GEMINI_KEY}`;
+          console.log(`  ✓ Fallback: ${fallback} (${ver})\n`);
+          return fallback;
         }
-      } else {
-        console.log(`  [${ver}] Listagem: ${r.status}`);
+        // Último recurso: qualquer gemini pro
+        const proBk = names.find(n => n.includes("pro") && !skipPatterns.some(s => n.includes(s)));
+        if (proBk) {
+          GEMINI_URL = `https://generativelanguage.googleapis.com/${ver}/models/${proBk}:generateContent?key=${GEMINI_KEY}`;
+          console.log(`  ✓ Fallback pro: ${proBk} (${ver})\n`);
+          return proBk;
+        }
       }
     } catch(e) {
       console.log(`  [${ver}] Erro: ${e.message}`);
     }
   }
 
-  // Se listagem não funcionou, tenta brute-force
-  console.log("\n  Listagem falhou. Tentando modelos direto...\n");
-  const attempts = [
-    { m:"gemini-1.5-flash",        v:"v1beta" },
-    { m:"gemini-1.5-flash",        v:"v1"     },
-    { m:"gemini-pro",              v:"v1beta" },
-    { m:"gemini-pro",              v:"v1"     },
-    { m:"gemini-1.5-flash-latest", v:"v1beta" },
-    { m:"gemini-1.5-flash-latest", v:"v1"     },
-    { m:"gemini-2.0-flash-lite",   v:"v1beta" },
-  ];
-
-  for (const a of attempts) {
-    const url = `https://generativelanguage.googleapis.com/${a.v}/models/${a.m}:generateContent?key=${GEMINI_KEY}`;
-    try {
-      const r = await fetch(url, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ contents:[{parts:[{text:"Diga OK"}]}], generationConfig:{maxOutputTokens:5} }),
-      });
-      if (r.ok) {
-        GEMINI_URL = url;
-        console.log(`  ✓ ${a.v}/${a.m} funcionou!\n`);
-        return a.m;
-      }
-      console.log(`  ✗ ${a.v}/${a.m}: ${r.status}`);
-    } catch(e) {
-      console.log(`  ✗ ${a.v}/${a.m}: ${e.message}`);
-    }
-  }
-
-  console.error("\n❌ Nenhum modelo Gemini respondeu.");
-  console.error("   Possíveis causas:");
-  console.error("   1. API key inválida — recrie em aistudio.google.com");
-  console.error("   2. Generative Language API não habilitada no projeto");
-  console.error("      → console.cloud.google.com → APIs & Services → Enable 'Generative Language API'");
-  console.error("   3. Key com restrições de API — remova restrições ou adicione 'Generative Language API'");
+  console.error("\n❌ Nenhum modelo Gemini disponível.");
   process.exit(1);
 }
 
