@@ -2,18 +2,97 @@
  * ══════════════════════════════════════════════════════════════
  *  AGENTE DE TRIAGEM AUTOMÁTICA — VOZ DA OPERAÇÃO
  *  Engenharia Logística · Ferreira Costa · CD Cabo
- *  100% GRATUITO — Google Gemini 1.5 Flash (free tier)
+ *  100% GRATUITO — Google Gemini (free tier, auto-detect model)
  * ══════════════════════════════════════════════════════════════
  */
 
 const GEMINI_KEY = process.env.GEMINI_API_KEY || "";
-const GEMINI_MODEL = "gemini-1.5-flash-latest";
-const GEMINI_URL = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${GEMINI_KEY}`;
 const FIREBASE_URL = process.env.FIREBASE_URL || "https://voz-da-operacao-default-rtdb.firebaseio.com";
 const TEAMS_WEBHOOK = process.env.TEAMS_WEBHOOK_URL || "";
 const WA_NUMBERS = (process.env.WHATSAPP_NUMBERS || "").split(",").filter(Boolean);
 const WA_APIKEYS = (process.env.WHATSAPP_APIKEYS || "").split(",").filter(Boolean);
 const STATUS_OPEN = ["Aberto", "Em andamento", "Pendente", "Aguardando usuario"];
+
+let GEMINI_URL = "";
+
+/* ── Auto-detect: tenta cada modelo+endpoint até um funcionar ── */
+async function discoverModel() {
+  console.log("🔎 Descobrindo modelo disponível...\n");
+
+  // Primeiro: listar modelos da API key
+  for (const ver of ["v1beta", "v1"]) {
+    try {
+      const r = await fetch(`https://generativelanguage.googleapis.com/${ver}/models?key=${GEMINI_KEY}`);
+      if (r.ok) {
+        const data = await r.json();
+        const names = (data.models || []).map(m => m.name.replace("models/",""));
+        console.log(`  [${ver}] ${names.length} modelos encontrados:`);
+        names.forEach(n => console.log(`    - ${n}`));
+
+        // Escolher o melhor disponível
+        const prefs = ["gemini-2.5-flash","gemini-2.0-flash","gemini-1.5-flash","gemini-1.5-pro","gemini-pro"];
+        for (const p of prefs) {
+          const match = names.find(n => n.startsWith(p));
+          if (match) {
+            GEMINI_URL = `https://generativelanguage.googleapis.com/${ver}/models/${match}:generateContent?key=${GEMINI_KEY}`;
+            console.log(`\n  ✓ Selecionado: ${match} (${ver})\n`);
+            return match;
+          }
+        }
+        // Fallback: qualquer modelo que suporte generateContent
+        const any = names.find(n => n.includes("gemini"));
+        if (any) {
+          GEMINI_URL = `https://generativelanguage.googleapis.com/${ver}/models/${any}:generateContent?key=${GEMINI_KEY}`;
+          console.log(`\n  ✓ Fallback: ${any} (${ver})\n`);
+          return any;
+        }
+      } else {
+        console.log(`  [${ver}] Listagem: ${r.status}`);
+      }
+    } catch(e) {
+      console.log(`  [${ver}] Erro: ${e.message}`);
+    }
+  }
+
+  // Se listagem não funcionou, tenta brute-force
+  console.log("\n  Listagem falhou. Tentando modelos direto...\n");
+  const attempts = [
+    { m:"gemini-1.5-flash",        v:"v1beta" },
+    { m:"gemini-1.5-flash",        v:"v1"     },
+    { m:"gemini-pro",              v:"v1beta" },
+    { m:"gemini-pro",              v:"v1"     },
+    { m:"gemini-1.5-flash-latest", v:"v1beta" },
+    { m:"gemini-1.5-flash-latest", v:"v1"     },
+    { m:"gemini-2.0-flash-lite",   v:"v1beta" },
+  ];
+
+  for (const a of attempts) {
+    const url = `https://generativelanguage.googleapis.com/${a.v}/models/${a.m}:generateContent?key=${GEMINI_KEY}`;
+    try {
+      const r = await fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ contents:[{parts:[{text:"Diga OK"}]}], generationConfig:{maxOutputTokens:5} }),
+      });
+      if (r.ok) {
+        GEMINI_URL = url;
+        console.log(`  ✓ ${a.v}/${a.m} funcionou!\n`);
+        return a.m;
+      }
+      console.log(`  ✗ ${a.v}/${a.m}: ${r.status}`);
+    } catch(e) {
+      console.log(`  ✗ ${a.v}/${a.m}: ${e.message}`);
+    }
+  }
+
+  console.error("\n❌ Nenhum modelo Gemini respondeu.");
+  console.error("   Possíveis causas:");
+  console.error("   1. API key inválida — recrie em aistudio.google.com");
+  console.error("   2. Generative Language API não habilitada no projeto");
+  console.error("      → console.cloud.google.com → APIs & Services → Enable 'Generative Language API'");
+  console.error("   3. Key com restrições de API — remova restrições ou adicione 'Generative Language API'");
+  process.exit(1);
+}
 
 /* ── Firebase ── */
 async function fbGet(path) {
@@ -57,7 +136,6 @@ Responda APENAS com JSON válido, sem markdown, sem texto extra:
 
 async function analyzeTicket(ticket) {
   const ticketInfo = `TICKET: ${ticket.id}\nTÍTULO: ${ticket.title}\nTIPO: ${ticket.type||"N/A"}\nCRITICIDADE: ${ticket.criticality}\nSTATUS: ${ticket.status}\nDESCRIÇÃO: ${ticket.desc||"Sem descrição"}\nSOLICITANTE: ${ticket.requester}\nDOC REF: ${ticket.doc||"Nenhum"}\nABERTO EM: ${ticket.createdAt}`;
-
   const fullPrompt = `${WMS_CONTEXT}\n\n--- TICKET PARA TRIAGEM ---\n${ticketInfo}`;
 
   try {
@@ -66,21 +144,15 @@ async function analyzeTicket(ticket) {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         contents: [{ parts: [{ text: fullPrompt }] }],
-        generationConfig: {
-          temperature: 0.3,
-          maxOutputTokens: 1024,
-        },
+        generationConfig: { temperature: 0.3, maxOutputTokens: 1024 },
       }),
     });
     if (!res.ok) throw new Error(`Gemini ${res.status}: ${(await res.text()).slice(0,300)}`);
     const data = await res.json();
-    const text = data.candidates && data.candidates[0] && data.candidates[0].content && data.candidates[0].content.parts && data.candidates[0].content.parts[0] && data.candidates[0].content.parts[0].text;
-    if (!text) throw new Error("Resposta vazia do Gemini");
-
-    // Limpar markdown e extrair JSON
-    const clean = text.replace(/```json\s*/g, "").replace(/```\s*/g, "").trim();
-    const jsonMatch = clean.match(/\{[\s\S]*\}/);
-    if (!jsonMatch) throw new Error("JSON não encontrado na resposta");
+    const text = data.candidates?.[0]?.content?.parts?.[0]?.text;
+    if (!text) throw new Error("Resposta vazia");
+    const jsonMatch = text.replace(/```json\s*/g,"").replace(/```\s*/g,"").trim().match(/\{[\s\S]*\}/);
+    if (!jsonMatch) throw new Error("JSON não encontrado");
     return JSON.parse(jsonMatch[0]);
   } catch (e) {
     console.error(`  ✗ Erro ${ticket.id}:`, e.message);
@@ -105,7 +177,7 @@ function buildTeamsCard(results, dateStr) {
     return `${e} **${r.ticket.id}** — ${r.analysis.resumo}`;
   }).join("\n\n");
 
-  const sqlLines = sorted.filter(r=>r.analysis.severidade==="Crítico" && r.analysis.sql_queries.length>0).slice(0,3).map(r => {
+  const sqlLines = sorted.filter(r=>r.analysis.severidade==="Crítico" && r.analysis.sql_queries?.length>0).slice(0,3).map(r => {
     const sq=r.analysis.sql_queries[0];
     return `**${r.ticket.id}** — ${sq.titulo}:\n\`${sq.query.slice(0,200)}\``;
   }).join("\n\n");
@@ -124,7 +196,7 @@ function buildTeamsCard(results, dateStr) {
       { type:"TextBlock", text:sqlLines, wrap:true, size:"small", fontType:"monospace" }
     );
   }
-  if (results.length > 15) body.push({ type:"TextBlock", text:`_+${results.length-15} tickets_`, isSubtle:true, size:"small" });
+  if (results.length>15) body.push({ type:"TextBlock", text:`_+${results.length-15} tickets_`, isSubtle:true, size:"small" });
 
   return { type:"message", attachments:[{ contentType:"application/vnd.microsoft.card.adaptive", content:{ $schema:"http://adaptivecards.io/schemas/adaptive-card.json", type:"AdaptiveCard", version:"1.4", body }}] };
 }
@@ -160,13 +232,14 @@ async function main() {
 
   console.log(`\n${"═".repeat(50)}`);
   console.log(`  AGENTE DE TRIAGEM — ${dateStr}`);
-  console.log(`  Motor: ${GEMINI_MODEL} (free tier)`);
   console.log(`${"═".repeat(50)}\n`);
 
   if (!GEMINI_KEY) {
-    console.error("❌ GEMINI_API_KEY não configurada!\n   → aistudio.google.com → Get API Key\n   → GitHub Secrets → GEMINI_API_KEY");
+    console.error("❌ GEMINI_API_KEY não configurada!");
     process.exit(1);
   }
+
+  await discoverModel();
 
   console.log("📋 Carregando tickets...");
   const raw = await fbGet("tickets");
