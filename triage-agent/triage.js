@@ -2,12 +2,13 @@
  * ══════════════════════════════════════════════════════════════
  *  AGENTE DE TRIAGEM AUTOMÁTICA — VOZ DA OPERAÇÃO
  *  Engenharia Logística · Ferreira Costa · CD Cabo
- *  100% GRATUITO — Google Gemini 2.0 Flash (free tier)
+ *  100% GRATUITO — Google Gemini 1.5 Flash (free tier)
  * ══════════════════════════════════════════════════════════════
  */
 
 const GEMINI_KEY = process.env.GEMINI_API_KEY || "";
-const GEMINI_URL = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${GEMINI_KEY}`;
+const GEMINI_MODEL = "gemini-1.5-flash-latest";
+const GEMINI_URL = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${GEMINI_KEY}`;
 const FIREBASE_URL = process.env.FIREBASE_URL || "https://voz-da-operacao-default-rtdb.firebaseio.com";
 const TEAMS_WEBHOOK = process.env.TEAMS_WEBHOOK_URL || "";
 const WA_NUMBERS = (process.env.WHATSAPP_NUMBERS || "").split(",").filter(Boolean);
@@ -31,7 +32,7 @@ async function fbSet(path, value) {
 }
 
 /* ── Gemini — análise ── */
-const SYSTEM_PROMPT = `Você é um agente de triagem especialista em WMS (Warehouse Management System) da Ferreira Costa, CD Cabo de Santo Agostinho.
+const WMS_CONTEXT = `Você é um agente de triagem especialista em WMS (Warehouse Management System) da Ferreira Costa, CD Cabo de Santo Agostinho.
 
 DOMÍNIOS:
 - Via Cega (recebimento cego): tabelas VCEGA, VCEGA_IT, VCEGA_IT_CONF, VCEGA_IT_LOG, WMS_VCEGA_UMA. PKs compostas: NR_VIACEGA + COD_EMPRESA + CODIGO_PRODUTO + SEQUENCIA. VCEGA_IT usa PRODUTO, outras usam CODIGO_PRODUTO. Sempre COD_EMPRESA no WHERE.
@@ -44,26 +45,43 @@ DOMÍNIOS:
 
 SCHEMAS Oracle: MAXXON e SFC. DB Links: @fcbkp_cab.com (CABO), @fcbkp_ObcCabo.com (OBC).
 
-Responda APENAS JSON válido:
+INSTRUÇÕES:
+1. Classifique o domínio
+2. Avalie severidade real (Crítico/Alto/Médio/Baixo) pelo impacto operacional
+3. Formule hipótese de causa raiz
+4. Gere 1-3 SQLs Oracle para investigar (use dados do ticket como filtros)
+5. Recomende próximos passos concretos
+
+Responda APENAS com JSON válido, sem markdown, sem texto extra:
 {"dominio":"string","severidade":"Crítico|Alto|Médio|Baixo","hipotese":"string","sql_queries":[{"titulo":"string","query":"SQL Oracle"}],"proximos_passos":["string"],"resumo":"1 frase"}`;
 
 async function analyzeTicket(ticket) {
-  const prompt = `TICKET: ${ticket.id}\nTÍTULO: ${ticket.title}\nTIPO: ${ticket.type||"N/A"}\nCRITICIDADE: ${ticket.criticality}\nSTATUS: ${ticket.status}\nDESCRIÇÃO: ${ticket.desc||"Sem descrição"}\nSOLICITANTE: ${ticket.requester}\nDOC REF: ${ticket.doc||"Nenhum"}\nABERTO EM: ${ticket.createdAt}`;
+  const ticketInfo = `TICKET: ${ticket.id}\nTÍTULO: ${ticket.title}\nTIPO: ${ticket.type||"N/A"}\nCRITICIDADE: ${ticket.criticality}\nSTATUS: ${ticket.status}\nDESCRIÇÃO: ${ticket.desc||"Sem descrição"}\nSOLICITANTE: ${ticket.requester}\nDOC REF: ${ticket.doc||"Nenhum"}\nABERTO EM: ${ticket.createdAt}`;
+
+  const fullPrompt = `${WMS_CONTEXT}\n\n--- TICKET PARA TRIAGEM ---\n${ticketInfo}`;
+
   try {
     const res = await fetch(GEMINI_URL, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        system_instruction: { parts: [{ text: SYSTEM_PROMPT }] },
-        contents: [{ parts: [{ text: prompt }] }],
-        generationConfig: { temperature: 0.3, maxOutputTokens: 1024, responseMimeType: "application/json" },
+        contents: [{ parts: [{ text: fullPrompt }] }],
+        generationConfig: {
+          temperature: 0.3,
+          maxOutputTokens: 1024,
+        },
       }),
     });
-    if (!res.ok) throw new Error(`Gemini ${res.status}: ${(await res.text()).slice(0,200)}`);
+    if (!res.ok) throw new Error(`Gemini ${res.status}: ${(await res.text()).slice(0,300)}`);
     const data = await res.json();
     const text = data.candidates && data.candidates[0] && data.candidates[0].content && data.candidates[0].content.parts && data.candidates[0].content.parts[0] && data.candidates[0].content.parts[0].text;
-    if (!text) throw new Error("Resposta vazia");
-    return JSON.parse(text.replace(/```json|```/g, "").trim());
+    if (!text) throw new Error("Resposta vazia do Gemini");
+
+    // Limpar markdown e extrair JSON
+    const clean = text.replace(/```json\s*/g, "").replace(/```\s*/g, "").trim();
+    const jsonMatch = clean.match(/\{[\s\S]*\}/);
+    if (!jsonMatch) throw new Error("JSON não encontrado na resposta");
+    return JSON.parse(jsonMatch[0]);
   } catch (e) {
     console.error(`  ✗ Erro ${ticket.id}:`, e.message);
     return { dominio:"Erro", severidade:"Médio", hipotese:"Falha: "+e.message, sql_queries:[], proximos_passos:["Analisar manualmente"], resumo:"Análise falhou" };
@@ -142,7 +160,7 @@ async function main() {
 
   console.log(`\n${"═".repeat(50)}`);
   console.log(`  AGENTE DE TRIAGEM — ${dateStr}`);
-  console.log(`  Motor: Gemini 2.0 Flash (free tier)`);
+  console.log(`  Motor: ${GEMINI_MODEL} (free tier)`);
   console.log(`${"═".repeat(50)}\n`);
 
   if (!GEMINI_KEY) {
